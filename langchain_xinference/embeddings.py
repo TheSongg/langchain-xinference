@@ -1,7 +1,8 @@
 """Wrapper around Xinference embedding models."""
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
+import requests
 from langchain_core.embeddings import Embeddings
 
 
@@ -68,23 +69,29 @@ class XinferenceEmbeddings(Embeddings):
 
         xinference = XinferenceEmbeddings(
             server_url="http://0.0.0.0:9997",
-            model_uid = {model_uid} # replace model_uid with the model UID return from launching the model
+            model_uid={model_uid},  # replace model_uid with the model UID return from launching the model
         )
 
     """  # noqa: E501
 
     client: Any
+    async_client: Any
     server_url: Optional[str]
     """URL of the xinference server"""
     model_uid: Optional[str]
     """UID of the launched model"""
 
-    def __init__(self, server_url: Optional[str] = None, model_uid: Optional[str] = None):
+    def __init__(
+        self,
+        server_url: Optional[str] = None,
+        model_uid: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ):
         try:
-            from xinference.client import RESTfulClient
+            from xinference.client import AsyncRESTfulClient, RESTfulClient
         except ImportError:
             try:
-                from xinference_client import RESTfulClient
+                from xinference_client import AsyncRESTfulClient, RESTfulClient
             except ImportError as e:
                 raise ImportError(
                     "Could not import RESTfulClient from xinference. Please install it"
@@ -103,7 +110,29 @@ class XinferenceEmbeddings(Embeddings):
 
         self.model_uid = model_uid
 
-        self.client = RESTfulClient(server_url)
+        self._headers: Dict[str, str] = {}
+        self._cluster_authed = False
+        self._check_cluster_authenticated()
+        if api_key is not None and self._cluster_authed:
+            self._headers["Authorization"] = f"Bearer {api_key}"
+
+        self.client = RESTfulClient(server_url, api_key)
+        try:
+            self.async_client = AsyncRESTfulClient(server_url, api_key)
+        except RuntimeError:
+            self.async_client = None
+
+    def _check_cluster_authenticated(self) -> None:
+        url = f"{self.server_url}/v1/cluster/auth"
+        response = requests.get(url)
+        if response.status_code == 404:
+            self._cluster_authed = False
+        else:
+            if response.status_code != 200:
+                raise RuntimeError(f"Failed to get cluster information, detail: {response.json()['detail']}")
+            response_data = response.json()
+
+            self._cluster_authed = bool(response_data["auth"])
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Embed a list of documents using Xinference.
@@ -118,6 +147,19 @@ class XinferenceEmbeddings(Embeddings):
         embeddings = [model.create_embedding(text)["data"][0]["embedding"] for text in texts]
         return [list(map(float, e)) for e in embeddings]
 
+    async def aembed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Embed a list of documents using Xinference.
+        Args:
+            texts: The list of texts to embed.
+        Returns:
+            List of embeddings, one for each text.
+        """
+
+        model = await self.async_client.get_model(self.model_uid)
+
+        embeddings = [(await model.create_embedding(text))["data"][0]["embedding"] for text in texts]
+        return [list(map(float, e)) for e in embeddings]
+
     def embed_query(self, text: str) -> List[float]:
         """Embed a query of documents using Xinference.
         Args:
@@ -129,6 +171,22 @@ class XinferenceEmbeddings(Embeddings):
         model = self.client.get_model(self.model_uid)
 
         embedding_res = model.create_embedding(text)
+
+        embedding = embedding_res["data"][0]["embedding"]
+
+        return list(map(float, embedding))
+
+    async def aembed_query(self, text: str) -> List[float]:
+        """Embed a query of documents using Xinference.
+        Args:
+            text: The text to embed.
+        Returns:
+            Embeddings for the text.
+        """
+
+        model = await self.async_client.get_model(self.model_uid)
+
+        embedding_res = await model.create_embedding(text)
 
         embedding = embedding_res["data"][0]["embedding"]
 
